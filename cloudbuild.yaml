@@ -1,0 +1,49 @@
+substitutions:
+  _REGION: us-central1
+  _ZONE: us-central1-a
+  _VM_NAME: two-tier-vm
+  _REPOSITORY: flask-app
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    id: build
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/flask-app:$COMMIT_SHA
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/flask-app:latest
+      - .
+
+  - name: gcr.io/cloud-builders/docker
+    id: push
+    args:
+      - push
+      - --all-tags
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/flask-app
+
+  - name: gcr.io/cloud-builders/gcloud
+    id: copy-compose
+    args:
+      - compute
+      - scp
+      - --zone=${_ZONE}
+      - docker-compose.yml
+      - ${_VM_NAME}:~/app/docker-compose.yml
+
+  - name: gcr.io/cloud-builders/gcloud
+    id: deploy
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        gcloud compute ssh ${_VM_NAME} --zone=${_ZONE} --command="
+          set -e
+          cd ~/app
+          export IMAGE=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/flask-app:$COMMIT_SHA
+          docker compose pull flask-app
+          docker compose up -d
+        "
+
+options:
+  logging: CLOUD_LOGGING_ONLY
