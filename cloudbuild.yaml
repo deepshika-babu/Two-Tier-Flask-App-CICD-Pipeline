@@ -53,8 +53,8 @@ steps:
           set -e
           cd ~/app
           export IMAGE=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/flask-app:$COMMIT_SHA
-          docker compose pull flask-app
-          docker compose up -d
+          sudo -E docker compose pull flask-app
+          sudo -E docker compose up -d
         "
 
 options:
