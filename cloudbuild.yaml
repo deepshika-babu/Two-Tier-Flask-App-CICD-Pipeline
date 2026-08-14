@@ -34,14 +34,15 @@ steps:
       - --command=mkdir -p ~/app
 
   - name: gcr.io/cloud-builders/gcloud
-    id: copy-compose
+    id: copy-files
     args:
       - compute
       - scp
       - --quiet
       - --zone=${_ZONE}
       - docker-compose.yml
-      - ${_SSH_USER}@${_VM_NAME}:~/app/docker-compose.yml
+      - scripts/deploy-on-vm.sh
+      - ${_SSH_USER}@${_VM_NAME}:~/app/
 
   - name: gcr.io/cloud-builders/gcloud
     id: deploy
@@ -51,11 +52,8 @@ steps:
       - |
         gcloud compute ssh ${_SSH_USER}@${_VM_NAME} --zone=${_ZONE} --quiet --command="
           set -e
-          cd ~/app
-          export IMAGE=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/flask-app:$COMMIT_SHA
-          gcloud auth print-access-token | sudo docker login -u oauth2accesstoken --password-stdin https://${_REGION}-docker.pkg.dev
-          sudo -E docker compose pull flask-app
-          sudo -E docker compose up -d
+          chmod +x ~/app/deploy-on-vm.sh
+          REGION=${_REGION} IMAGE=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/flask-app:$COMMIT_SHA ~/app/deploy-on-vm.sh
         "
 
 options:

@@ -1,3 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REGION="${REGION:?REGION is required}"
+IMAGE="${IMAGE:?IMAGE is required}"
+
+TOKEN=$(curl -sf -H "Metadata-Flavor: Google" \
+  "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" \
+  | python3 -c "import sys, json; print(json.load(sys.stdin)['access_token'])")
+
+echo "${TOKEN}" | sudo docker login -u oauth2accesstoken --password-stdin \
+  "https://${REGION}-docker.pkg.dev"
+
+sudo docker pull "${IMAGE}"
+
+mkdir -p ~/app
+cat > ~/app/docker-compose.yml << 'EOF'
 services:
   mysql:
     container_name: mysql
@@ -48,3 +65,9 @@ volumes:
 
 networks:
   two-tier-nt:
+EOF
+
+cd ~/app
+export IMAGE
+sudo -E docker compose config >/dev/null
+sudo -E docker compose up -d

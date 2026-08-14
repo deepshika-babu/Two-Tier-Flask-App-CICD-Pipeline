@@ -125,10 +125,27 @@ Grant the VM service account permission to pull images:
 
 ```bash
 # Run from Cloud Shell or local machine (not on VM)
+export PROJECT_ID=two-tier-flask-app
+export VM_NAME=two-tier-vm
+export ZONE=us-central1-a
+export REGION=us-central1
+export REPOSITORY=flask-app
+
+bash scripts/grant-vm-ar-access.sh
+```
+
+Or manually:
+
+```bash
 VM_SA=$(gcloud compute instances describe $VM_NAME --zone=$ZONE \
   --format='value(serviceAccounts[0].email)')
 
 gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:${VM_SA}" \
+  --role="roles/artifactregistry.reader"
+
+gcloud artifacts repositories add-iam-policy-binding $REPOSITORY \
+  --location=$REGION \
   --member="serviceAccount:${VM_SA}" \
   --role="roles/artifactregistry.reader"
 ```
@@ -143,12 +160,26 @@ gcloud projects get-iam-policy $PROJECT_ID \
   --format="table(bindings.role)"
 ```
 
-Test pull on the VM (run after at least one successful Cloud Build push):
+Test pull on the VM (wait ~60s after IAM changes):
+
+**First**, copy the deploy script to the VM (required — the file is not on the VM until you do this):
+
+```bash
+# Option A: if your repo is cloned in Cloud Shell
+gcloud compute scp scripts/deploy-on-vm.sh ubuntu@$VM_NAME:~/app/deploy-on-vm.sh --zone=$ZONE
+
+# Option B: clone the repo in Cloud Shell first, then scp
+git clone https://github.com/YOUR_USERNAME/YOUR_REPO.git
+cd YOUR_REPO
+gcloud compute scp scripts/deploy-on-vm.sh ubuntu@$VM_NAME:~/app/deploy-on-vm.sh --zone=$ZONE
+```
+
+**Then** run the deploy script on the VM:
 
 ```bash
 gcloud compute ssh ubuntu@$VM_NAME --zone=$ZONE --command="
-  gcloud auth print-access-token | sudo docker login -u oauth2accesstoken --password-stdin https://${REGION}-docker.pkg.dev
-  sudo docker pull ${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/flask-app:latest
+  chmod +x ~/app/deploy-on-vm.sh
+  REGION=${REGION} IMAGE=${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/flask-app:latest ~/app/deploy-on-vm.sh
 "
 ```
 
@@ -257,7 +288,7 @@ App: http://localhost:5000
 | `scp: /root/app/... No such file or directory` | Cloud Build SSHs as `ubuntu`, not `root`. Ensure `vm-setup.sh` ran as ubuntu and `~/app` exists: `mkdir -p ~/app` on the VM |
 | `permission denied` on `docker.sock` | Non-interactive SSH may not load the `docker` group. Deploy uses `sudo docker compose`. Verify on VM: `sudo docker ps` |
 | Cloud Build SSH fails | Check IAM roles on Cloud Build SA; verify VM name/zone substitutions |
-| VM cannot pull image | Grant `artifactregistry.reader` to the **VM** service account (not Cloud Build). Test: `gcloud auth print-access-token \| sudo docker login ...` then `sudo docker pull ...` |
+| VM cannot pull image / `Unauthenticated request` | Run `bash scripts/grant-vm-ar-access.sh` (project **and** repo IAM). Wait 60s. Deploy uses VM metadata token, not `gcloud auth print-access-token` |
 | Flask unhealthy | Wait for MySQL healthcheck (~60s); check `docker logs two-tier-app` |
 | Port 5000 unreachable | Verify firewall rule and VM tag `flask-app` |
 | Build exceeds free tier | Use `e2-micro` only; stay in `us-central1`/`us-east1`/`us-west1`; delete old AR images |
