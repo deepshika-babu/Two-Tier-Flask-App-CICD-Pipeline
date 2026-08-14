@@ -126,7 +126,7 @@ Grant the VM service account permission to pull images:
 ```bash
 # Run from Cloud Shell or local machine (not on VM)
 VM_SA=$(gcloud compute instances describe $VM_NAME --zone=$ZONE \
-  --format='value(serviceAccount[0].email)')
+  --format='value(serviceAccounts[0].email)')
 
 gcloud projects add-iam-policy-binding $PROJECT_ID \
   --member="serviceAccount:${VM_SA}" \
@@ -235,6 +235,7 @@ App: http://localhost:5000
 
 | Issue | Fix |
 |---|---|
+| `scp: /root/app/... No such file or directory` | Cloud Build SSHs as `ubuntu`, not `root`. Ensure `vm-setup.sh` ran as ubuntu and `~/app` exists: `mkdir -p ~/app` on the VM |
 | Cloud Build SSH fails | Check IAM roles on Cloud Build SA; verify VM name/zone substitutions |
 | VM cannot pull image | Grant `artifactregistry.reader` to VM service account; run `gcloud auth configure-docker` on VM |
 | Flask unhealthy | Wait for MySQL healthcheck (~60s); check `docker logs two-tier-app` |

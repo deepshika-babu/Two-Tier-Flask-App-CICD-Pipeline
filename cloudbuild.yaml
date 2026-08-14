@@ -3,6 +3,7 @@ substitutions:
   _ZONE: us-central1-a
   _VM_NAME: two-tier-vm
   _REPOSITORY: flask-app
+  _SSH_USER: ubuntu
 
 steps:
   - name: gcr.io/cloud-builders/docker
@@ -23,13 +24,24 @@ steps:
       - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/flask-app
 
   - name: gcr.io/cloud-builders/gcloud
+    id: prepare-vm
+    args:
+      - compute
+      - ssh
+      - --quiet
+      - --zone=${_ZONE}
+      - ${_SSH_USER}@${_VM_NAME}
+      - --command=mkdir -p ~/app
+
+  - name: gcr.io/cloud-builders/gcloud
     id: copy-compose
     args:
       - compute
       - scp
+      - --quiet
       - --zone=${_ZONE}
       - docker-compose.yml
-      - ${_VM_NAME}:~/app/docker-compose.yml
+      - ${_SSH_USER}@${_VM_NAME}:~/app/docker-compose.yml
 
   - name: gcr.io/cloud-builders/gcloud
     id: deploy
@@ -37,7 +49,7 @@ steps:
     args:
       - -c
       - |
-        gcloud compute ssh ${_VM_NAME} --zone=${_ZONE} --command="
+        gcloud compute ssh ${_SSH_USER}@${_VM_NAME} --zone=${_ZONE} --quiet --command="
           set -e
           cd ~/app
           export IMAGE=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/flask-app:$COMMIT_SHA
