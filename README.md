@@ -2,19 +2,14 @@
 
 Automated CI/CD pipeline for a 2-tier Flask + MySQL application on Google Cloud Platform.
 
-| Original (AWS) | This project (GCP) |
-|---|---|
-| AWS EC2 | Compute Engine VM (`e2-micro`) |
-| Jenkins | Cloud Build |
-| `Jenkinsfile` | `cloudbuild.yaml` |
-| Docker Compose on VM | Docker Compose on VM |
+Push to GitHub → Cloud Build builds the image → Artifact Registry stores it → Compute Engine VM pulls and runs it with Docker Compose.
 
 ## Architecture
 
 ```
 Developer → GitHub → Cloud Build → Artifact Registry
                          ↓
-                    GCE VM (SSH deploy)
+              GCE VM (SSH deploy as ubuntu)
                     ├── Flask container
                     └── MySQL container
 ```
@@ -28,14 +23,15 @@ This setup stays within GCP Always Free limits when configured correctly:
 - **Artifact Registry:** 500 MB storage/month
 - **MySQL:** runs in Docker on the VM (no Cloud SQL cost)
 
+Stay in a free-tier region, use `e2-micro` only, and stop the VM when not in use.
+
 ## Prerequisites
 
 - GCP account with free trial / billing enabled
-- [gcloud CLI](https://cloud.google.com/sdk/docs/install) installed locally
+- [gcloud CLI](https://cloud.google.com/sdk/docs/install) or [Cloud Shell](https://shell.cloud.google.com)
 - GitHub repository for this project
-- Git installed locally
 
-Set your project ID once:
+Set these variables once (Cloud Shell or local terminal):
 
 ```bash
 export PROJECT_ID=your-gcp-project-id
@@ -59,6 +55,8 @@ gcloud services enable \
 
 ## Step 2: Create Artifact Registry
 
+Create the repository in a free-tier region (`us-central1`, `us-east1`, or `us-west1`):
+
 ```bash
 gcloud artifacts repositories create $REPOSITORY \
   --repository-format=docker \
@@ -66,21 +64,16 @@ gcloud artifacts repositories create $REPOSITORY \
   --description="Flask app images"
 ```
 
-## Step 3: Create firewall rules
+## Step 3: Create firewall rule
+
+Only port **5000** is required for the web app. SSH is already allowed on the default VPC via `default-allow-ssh` — you do not need a custom SSH firewall rule unless you want to restrict access to your IP.
 
 ```bash
 gcloud compute firewall-rules create allow-flask-5000 \
   --allow=tcp:5000 \
   --target-tags=flask-app \
   --description="Allow Flask app traffic"
-
-gcloud compute firewall-rules create allow-ssh \
-  --allow=tcp:22 \
-  --source-ranges=YOUR_IP/32 \
-  --description="Allow SSH from your IP"
 ```
-
-Replace `YOUR_IP` with your public IP (find it at https://ifconfig.me).
 
 ## Step 4: Create the VM
 
@@ -95,42 +88,40 @@ gcloud compute instances create $VM_NAME \
   --scopes=cloud-platform
 ```
 
+The `cloud-platform` scope lets the VM's service account authenticate to Artifact Registry via the metadata server.
+
 ## Step 5: Bootstrap the VM
 
-SSH into the VM:
+### 5a. Copy and run the setup script
+
+From Cloud Shell (clone your repo first if needed):
 
 ```bash
-gcloud compute ssh $VM_NAME --zone=$ZONE
+git clone https://github.com/YOUR_USERNAME/YOUR_REPO.git
+cd YOUR_REPO
+
+gcloud compute scp scripts/vm-setup.sh ubuntu@$VM_NAME:~/vm-setup.sh --zone=$ZONE
+
+gcloud compute ssh ubuntu@$VM_NAME --zone=$ZONE --command="
+  export PROJECT_ID=${PROJECT_ID}
+  export REGION=${REGION}
+  bash ~/vm-setup.sh
+"
 ```
 
-On the VM, install Docker and configure Artifact Registry:
+The script installs Docker, Docker Compose, the gcloud CLI, and configures Artifact Registry auth for both `ubuntu` and `root`.
+
+### 5b. Verify Docker works
 
 ```bash
-export PROJECT_ID=your-gcp-project-id
-export REGION=us-central1
-
-# Copy vm-setup.sh to the VM, or paste its contents and run:
-bash scripts/vm-setup.sh
+gcloud compute ssh ubuntu@$VM_NAME --zone=$ZONE --command="sudo docker run hello-world"
 ```
 
-Log out and back in so Docker group membership applies:
+### 5c. Grant the VM permission to pull images
+
+Run from **Cloud Shell** (not on the VM). Both project-level **and** repository-level IAM are required:
 
 ```bash
-exit
-gcloud compute ssh $VM_NAME --zone=$ZONE
-newgrp docker
-```
-
-Grant the VM service account permission to pull images:
-
-```bash
-# Run from Cloud Shell or local machine (not on VM)
-export PROJECT_ID=two-tier-flask-app
-export VM_NAME=two-tier-vm
-export ZONE=us-central1-a
-export REGION=us-central1
-export REPOSITORY=flask-app
-
 bash scripts/grant-vm-ar-access.sh
 ```
 
@@ -140,6 +131,12 @@ Or manually:
 VM_SA=$(gcloud compute instances describe $VM_NAME --zone=$ZONE \
   --format='value(serviceAccounts[0].email)')
 
+echo "VM service account: ${VM_SA}"
+```
+
+Confirm this prints an email like `123456789012-compute@developer.gserviceaccount.com`. If it is blank, check `$VM_NAME` and `$ZONE`.
+
+```bash
 gcloud projects add-iam-policy-binding $PROJECT_ID \
   --member="serviceAccount:${VM_SA}" \
   --role="roles/artifactregistry.reader"
@@ -150,48 +147,11 @@ gcloud artifacts repositories add-iam-policy-binding $REPOSITORY \
   --role="roles/artifactregistry.reader"
 ```
 
-Verify the binding (should list `artifactregistry.reader`):
-
-```bash
-echo "VM service account: ${VM_SA}"
-gcloud projects get-iam-policy $PROJECT_ID \
-  --flatten="bindings[].members" \
-  --filter="bindings.members:serviceAccount:${VM_SA}" \
-  --format="table(bindings.role)"
-```
-
-Test pull on the VM (wait ~60s after IAM changes):
-
-**First**, copy the deploy script to the VM (required — the file is not on the VM until you do this):
-
-```bash
-# Option A: if your repo is cloned in Cloud Shell
-gcloud compute scp scripts/deploy-on-vm.sh ubuntu@$VM_NAME:~/app/deploy-on-vm.sh --zone=$ZONE
-
-# Option B: clone the repo in Cloud Shell first, then scp
-git clone https://github.com/YOUR_USERNAME/YOUR_REPO.git
-cd YOUR_REPO
-gcloud compute scp scripts/deploy-on-vm.sh ubuntu@$VM_NAME:~/app/deploy-on-vm.sh --zone=$ZONE
-```
-
-**Then** run the deploy script on the VM:
-
-```bash
-gcloud compute ssh ubuntu@$VM_NAME --zone=$ZONE --command="
-  chmod +x ~/app/deploy-on-vm.sh
-  REGION=${REGION} IMAGE=${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/flask-app:latest ~/app/deploy-on-vm.sh
-"
-```
-
-Create the app directory on the VM:
-
-```bash
-mkdir -p ~/app
-```
+Wait ~60 seconds for IAM to propagate before testing pulls.
 
 ## Step 6: Configure Cloud Build IAM
 
-Cloud Build needs permission to SSH into the VM and push images.
+Cloud Build needs permission to push images and SSH into the VM as `ubuntu`:
 
 ```bash
 PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')
@@ -210,14 +170,6 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
   --role="roles/artifactregistry.writer"
 ```
 
-Optional but recommended for SSH without opening port 22 publicly:
-
-```bash
-gcloud projects add-iam-policy-binding $PROJECT_ID \
-  --member="serviceAccount:${CLOUD_BUILD_SA}" \
-  --role="roles/iap.tunnelResourceAccessor"
-```
-
 ## Step 7: Connect GitHub and create trigger
 
 1. Open [Cloud Build Triggers](https://console.cloud.google.com/cloud-build/triggers)
@@ -228,11 +180,12 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
    - **Branch:** `^main$`
    - **Configuration:** Cloud Build configuration file
    - **Location:** `cloudbuild.yaml`
-4. Add substitution variables (must match your VM):
+4. Add substitution variables (must match your infrastructure):
    - `_REGION` = `us-central1`
    - `_ZONE` = `us-central1-a`
    - `_VM_NAME` = `two-tier-vm`
    - `_REPOSITORY` = `flask-app`
+   - `_SSH_USER` = `ubuntu`
 
 ## Step 8: Push code and deploy
 
@@ -255,21 +208,43 @@ gcloud compute instances describe $VM_NAME --zone=$ZONE \
 
 Open `http://<EXTERNAL_IP>:5000` in your browser.
 
-On the VM, confirm containers are running:
+On the VM:
 
 ```bash
-docker ps
+gcloud compute ssh ubuntu@$VM_NAME --zone=$ZONE
+sudo docker ps
 curl http://localhost:5000/health
+```
+
+MySQL can take up to 60 seconds to pass its healthcheck before Flask starts.
+
+## Manual deploy test (optional)
+
+Use this to test the VM independently of Cloud Build. The deploy script must exist on the VM first.
+
+```bash
+gcloud compute scp scripts/deploy-on-vm.sh ubuntu@$VM_NAME:~/app/deploy-on-vm.sh --zone=$ZONE
+
+gcloud compute ssh ubuntu@$VM_NAME --zone=$ZONE --command="
+  chmod +x ~/app/deploy-on-vm.sh
+  REGION=${REGION} IMAGE=${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/flask-app:latest ~/app/deploy-on-vm.sh
+"
+```
+
+Or SSH into the VM and run directly:
+
+```bash
+export REGION=us-central1
+export IMAGE=us-central1-docker.pkg.dev/your-project/flask-app/flask-app:latest
+~/app/deploy-on-vm.sh
 ```
 
 ## Local development (optional)
 
-Build and run locally without GCP:
-
 ```bash
 docker build -t flask-app:local .
 export IMAGE=flask-app:local
-docker compose up -d --build
+docker compose up -d
 ```
 
 App: http://localhost:5000
@@ -278,37 +253,49 @@ App: http://localhost:5000
 
 1. **Build** — Docker image tagged with `$COMMIT_SHA` and `latest`
 2. **Push** — image pushed to Artifact Registry
-3. **Copy** — `docker-compose.yml` copied to VM via `gcloud compute scp`
-4. **Deploy** — SSH into VM, pull image, `docker compose up -d`
+3. **Prepare VM** — create `~/app` on the VM
+4. **Copy files** — `docker-compose.yml` and `scripts/deploy-on-vm.sh` copied via SCP
+5. **Deploy** — SSH as `ubuntu`, run `deploy-on-vm.sh` which:
+   - Authenticates to Artifact Registry using the VM metadata token
+   - Pulls the image
+   - Writes a valid `docker-compose.yml` (avoids YAML issues with image tags)
+   - Runs `docker compose up -d`
 
 ## Troubleshooting
 
 | Issue | Fix |
 |---|---|
-| `scp: /root/app/... No such file or directory` | Cloud Build SSHs as `ubuntu`, not `root`. Ensure `vm-setup.sh` ran as ubuntu and `~/app` exists: `mkdir -p ~/app` on the VM |
-| `permission denied` on `docker.sock` | Non-interactive SSH may not load the `docker` group. Deploy uses `sudo docker compose`. Verify on VM: `sudo docker ps` |
-| Cloud Build SSH fails | Check IAM roles on Cloud Build SA; verify VM name/zone substitutions |
-| VM cannot pull image / `Unauthenticated request` | Run `bash scripts/grant-vm-ar-access.sh` (project **and** repo IAM). Wait 60s. Deploy uses VM metadata token, not `gcloud auth print-access-token` |
-| Flask unhealthy | Wait for MySQL healthcheck (~60s); check `docker logs two-tier-app` |
-| Port 5000 unreachable | Verify firewall rule and VM tag `flask-app` |
-| Build exceeds free tier | Use `e2-micro` only; stay in `us-central1`/`us-east1`/`us-west1`; delete old AR images |
+| `$VM_SA` is empty | Use `serviceAccounts` (plural) in the `--format` flag. Verify `$VM_NAME` and `$ZONE` |
+| `scp: /root/app/... No such file or directory` | Cloud Build connects as `ubuntu`, not `root`. Use `ubuntu@$VM_NAME` and ensure `~/app` exists |
+| `deploy-on-vm.sh: No such file or directory` | Copy the script to the VM with `gcloud compute scp` before running it manually |
+| `permission denied` on `docker.sock` | Deploy runs Docker with `sudo`. Verify with `sudo docker ps` on the VM |
+| `Login Succeeded` then `Unauthenticated request` on pull | Grant IAM at **project and repository** level via `scripts/grant-vm-ar-access.sh`. Wait 60s for propagation |
+| `go-yaml load error` / `mapping values are not allowed` | Docker image tags contain colons (`mysql:8.0`) and must be quoted in YAML. `deploy-on-vm.sh` writes a correct compose file on every deploy |
+| Cloud Build SSH fails | Check IAM roles on the Cloud Build service account; verify trigger substitution variables |
+| Flask unhealthy | Wait for MySQL healthcheck (~60s); check `sudo docker logs two-tier-app` |
+| Port 5000 unreachable | Verify the `allow-flask-5000` firewall rule and VM tag `flask-app` |
+| Build exceeds free tier | Use `e2-micro` only; stay in `us-central1`/`us-east1`/`us-west1`; delete old Artifact Registry images |
 
 ## Project structure
 
 ```
 .
-├── app.py                 # Flask application
-├── cloudbuild.yaml        # CI/CD pipeline (replaces Jenkinsfile)
-├── docker-compose.yml     # Flask + MySQL on VM
+├── app.py                      # Flask application
+├── cloudbuild.yaml             # CI/CD pipeline
+├── docker-compose.yml          # Flask + MySQL (local dev; VM gets a generated copy on deploy)
 ├── Dockerfile
 ├── requirement.txt
 ├── message.sql
 ├── scripts/
-│   └── vm-setup.sh        # One-time VM bootstrap
+│   ├── vm-setup.sh             # One-time VM bootstrap
+│   ├── deploy-on-vm.sh         # Pull image and start containers on the VM
+│   └── grant-vm-ar-access.sh   # Grant Artifact Registry read IAM to the VM
 └── templates/
     └── index.html
 ```
 
 ## Reference
 
-Based on [DevOps-Project-Two-Tier-Flask-App](https://github.com/prashantgohel321/DevOps-Project-Two-Tier-Flask-App), adapted for GCP Cloud Build.
+Based on [DevOps-Project-Two-Tier-Flask-App](https://github.com/
+prashantgohel321/DevOps-Project-Two-Tier-Flask-App), adapted for GCP 
+Cloud Build.
