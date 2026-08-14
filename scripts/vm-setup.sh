@@ -44,7 +44,10 @@ sudo apt-get update
 sudo apt-get install -y google-cloud-cli
 
 echo "==> Configuring Artifact Registry auth..."
+gcloud config set project "${PROJECT_ID}"
 gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+sudo gcloud config set project "${PROJECT_ID}"
+sudo gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
 
 echo "==> Creating app directory..."
 mkdir -p ~/app

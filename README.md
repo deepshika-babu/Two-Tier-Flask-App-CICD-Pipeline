@@ -133,6 +133,25 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
   --role="roles/artifactregistry.reader"
 ```
 
+Verify the binding (should list `artifactregistry.reader`):
+
+```bash
+echo "VM service account: ${VM_SA}"
+gcloud projects get-iam-policy $PROJECT_ID \
+  --flatten="bindings[].members" \
+  --filter="bindings.members:serviceAccount:${VM_SA}" \
+  --format="table(bindings.role)"
+```
+
+Test pull on the VM (run after at least one successful Cloud Build push):
+
+```bash
+gcloud compute ssh ubuntu@$VM_NAME --zone=$ZONE --command="
+  gcloud auth print-access-token | sudo docker login -u oauth2accesstoken --password-stdin https://${REGION}-docker.pkg.dev
+  sudo docker pull ${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/flask-app:latest
+"
+```
+
 Create the app directory on the VM:
 
 ```bash
@@ -238,7 +257,7 @@ App: http://localhost:5000
 | `scp: /root/app/... No such file or directory` | Cloud Build SSHs as `ubuntu`, not `root`. Ensure `vm-setup.sh` ran as ubuntu and `~/app` exists: `mkdir -p ~/app` on the VM |
 | `permission denied` on `docker.sock` | Non-interactive SSH may not load the `docker` group. Deploy uses `sudo docker compose`. Verify on VM: `sudo docker ps` |
 | Cloud Build SSH fails | Check IAM roles on Cloud Build SA; verify VM name/zone substitutions |
-| VM cannot pull image | Grant `artifactregistry.reader` to VM service account; run `gcloud auth configure-docker` on VM |
+| VM cannot pull image | Grant `artifactregistry.reader` to the **VM** service account (not Cloud Build). Test: `gcloud auth print-access-token \| sudo docker login ...` then `sudo docker pull ...` |
 | Flask unhealthy | Wait for MySQL healthcheck (~60s); check `docker logs two-tier-app` |
 | Port 5000 unreachable | Verify firewall rule and VM tag `flask-app` |
 | Build exceeds free tier | Use `e2-micro` only; stay in `us-central1`/`us-east1`/`us-west1`; delete old AR images |
@@ -262,5 +281,3 @@ App: http://localhost:5000
 ## Reference
 
 Based on [DevOps-Project-Two-Tier-Flask-App](https://github.com/prashantgohel321/DevOps-Project-Two-Tier-Flask-App), adapted for GCP Cloud Build.
-
-#test
